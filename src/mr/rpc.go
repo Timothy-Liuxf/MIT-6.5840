@@ -7,6 +7,7 @@ package mr
 //
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -25,6 +26,37 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+
+type TaskType int
+
+const (
+	NoTask TaskType = iota
+	Map
+	Reduce
+)
+
+type GetTaskRequest struct {
+}
+
+type GetTaskResponse struct {
+	TaskType        TaskType
+	TaskID          int
+	MapFileName     string
+	ReduceFileNames []string
+	NReduce         int
+}
+
+type CommitTaskRequest struct {
+	TaskType TaskType
+	TaskID   int
+}
+
+type CommitTaskResponse struct {
+}
+
+func GetMapResFileName(taskID int, reduceTaskID int) string {
+	return fmt.Sprintf("mr-%v-%v", taskID, reduceTaskID)
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
