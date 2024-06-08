@@ -462,12 +462,14 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu = sync.Mutex{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 	rf.dead = 0
 	rf.currentTerm = 0
 	rf.votedFor = NULL
+	rf.log = make([]int, 0)
 
 	rf.resetHeartbeatTimeWithoutLock()
 	rf.changeToFollowerWithoutLock(true)
