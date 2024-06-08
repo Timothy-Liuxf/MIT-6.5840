@@ -360,6 +360,8 @@ func (rf *Raft) RequestVotesFromPeersWithoutLock() {
 					}
 					if totalVotes > len(rf.peers)/2 {
 						rf.role = Leader
+						debugPrintln(rf.me, "changed to leader")
+						rf.sendHeartbeatsWithoutLock()
 					}
 				}
 			}
@@ -427,6 +429,7 @@ func (rf *Raft) ticker() {
 				if time.Since(rf.lastHeartbeatTime) > rf.heartbeatTimeout {
 					rf.role = Candidate
 					rf.currentTerm++
+					debugPrintln(rf.me, "changed to candidate")
 					rf.votedFor = rf.me
 					rf.resetHeartbeatTimeWithoutLock()
 					rf.votedMe[rf.me] = true
@@ -466,7 +469,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = NULL
 
-	rf.lastHeartbeatTime = time.Now()
+	rf.resetHeartbeatTimeWithoutLock()
 	rf.changeToFollowerWithoutLock(true)
 	rf.lastAckTime = make([]time.Time, len(peers))
 	for i := range rf.lastAckTime {
