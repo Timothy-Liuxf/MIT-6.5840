@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 
 	"bytes"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -41,7 +40,7 @@ func debugPrintln2B(args ...interface{}) {
 }
 
 func debugPrintln2C(args ...interface{}) {
-	fmt.Println(args...)
+	// fmt.Println(args...)
 }
 
 func minInt(a, b int) int {
