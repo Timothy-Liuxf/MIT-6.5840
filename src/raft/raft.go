@@ -596,6 +596,9 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 
 			rf.lastAckTime[server] = time.Now()
 			debugPrintln2B(rf.me, "received reply from", server, "at time in millisecond:", rf.lastAckTime[server].UnixMilli())
+			if args.Term != rf.currentTerm {
+				return
+			}
 			if !reply.Success {
 				if reply.Term > rf.currentTerm {
 					originTerm := rf.currentTerm
