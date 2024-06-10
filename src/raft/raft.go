@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -35,6 +38,10 @@ func debugPrintln2A(args ...interface{}) {
 
 func debugPrintln2B(args ...interface{}) {
 	// fmt.Println(args...)
+}
+
+func debugPrintln2C(args ...interface{}) {
+	fmt.Println(args...)
 }
 
 func minInt(a, b int) int {
@@ -145,14 +152,19 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(rf.currentTerm); err != nil {
+		panic("Failed to encode currentTerm: " + err.Error())
+	}
+	if err := e.Encode(rf.votedFor); err != nil {
+		panic("Failed to encode votedFor: " + err.Error())
+	}
+	if err := e.Encode(rf.log); err != nil {
+		panic("Failed to encode log: " + err.Error())
+	}
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -173,6 +185,30 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	debugPrintln2C(rf.me, "readPersist")
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if err := d.Decode(&currentTerm); err != nil {
+		panic("Failed to decode currentTerm: " + err.Error())
+	}
+	if err := d.Decode(&votedFor); err != nil {
+		panic("Failed to decode votedFor: " + err.Error())
+	}
+	if err := d.Decode(&log); err != nil {
+		panic("Failed to decode log: " + err.Error())
+	}
+	if log == nil || len(log) == 0 {
+		log = append(log, LogEntry{
+			Term:    -1,
+			Command: nil,
+		})
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 // the service says it has created a snapshot that has
@@ -182,6 +218,20 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
+}
+
+func (rf *Raft) updateCurrentTermWithoutLock(newTerm int) {
+	if newTerm != rf.currentTerm {
+		rf.currentTerm = newTerm
+		rf.persist()
+	}
+}
+
+func (rf *Raft) updateVotedForWithoutLock(newVotedFor int) {
+	if newVotedFor != rf.votedFor {
+		rf.votedFor = newVotedFor
+		rf.persist()
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -211,7 +261,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	originTerm := rf.currentTerm
 	if args.Term > originTerm {
 		changed := rf.changeToFollowerWithoutLock(true)
-		rf.currentTerm = args.Term
+		rf.updateCurrentTermWithoutLock(args.Term)
 		if changed {
 			debugPrintln2B(rf.me, "changed to follower because of vote request in `RequestVote`",
 				"args.Term:", args.Term, "originTerm:", originTerm)
@@ -231,7 +281,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				return
 			}
 		}
-		rf.votedFor = args.CandidateId
+		rf.updateVotedForWithoutLock(args.CandidateId)
 		reply.VoteGranted = true
 		debugPrintln2A(rf.me, "voted for", args.CandidateId)
 	}
@@ -300,7 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			debugPrintln2B(rf.me, "changed to follower because of append entries in `AppendEntries`",
 				"args.Term:", args.Term, "rf.currentTerm:", rf.currentTerm)
 		}
-		rf.currentTerm = args.Term
+		rf.updateCurrentTermWithoutLock(args.Term)
 		rf.resetHeartbeatTimeWithoutLock()
 
 		if args.PrevLogIndex >= len(rf.log) {
@@ -326,6 +376,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					newLog = append(newLog, rf.log[0])
 				}
 				rf.log = newLog
+				rf.persist()
 				reply.Success = true
 				rf.commitIndex = maxInt(minInt(args.LeaderCommit, len(rf.log)-1), rf.commitIndex)
 				rf.newCommitCond.Signal()
@@ -370,6 +421,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    term,
 		Command: command,
 	})
+	rf.persist()
 	rf.nextIndex[rf.me] = len(rf.log)
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 	rf.synchronizeEntriesWithoutLock()
@@ -404,7 +456,7 @@ func (rf *Raft) changeToFollowerWithoutLock(resetVote bool) bool {
 	}
 	rf.role = Follower
 	if resetVote {
-		rf.votedFor = NULL
+		rf.updateVotedForWithoutLock(NULL)
 	}
 	return changed
 }
@@ -422,7 +474,7 @@ func (rf *Raft) changeToCandidateWithoutLock() {
 	rf.role = Candidate
 	rf.currentTerm++
 	debugPrintln2A(rf.me, "current term:", rf.currentTerm, "changed to candidate")
-	rf.votedFor = rf.me
+	rf.updateVotedForWithoutLock(rf.me)
 	rf.resetHeartbeatTimeWithoutLock()
 	rf.votedMe = make([]bool, len(rf.peers))
 	rf.votedMe[rf.me] = true
@@ -458,7 +510,7 @@ func (rf *Raft) RequestVotesFromPeersWithoutLock() {
 
 				rf.lastAckTime[server] = time.Now()
 				if reply.Term > rf.currentTerm || (reply.Term == rf.currentTerm && reply.LastLogTerm > rf.log[len(rf.log)-1].Term) {
-					rf.currentTerm = reply.Term
+					rf.updateCurrentTermWithoutLock(reply.Term)
 					changed := rf.changeToFollowerWithoutLock(true)
 					if changed {
 						debugPrintln2B(rf.me,
@@ -471,8 +523,10 @@ func (rf *Raft) RequestVotesFromPeersWithoutLock() {
 				if reply.VoteGranted {
 					rf.votedMe[server] = true
 					totalVotes := 0
-					for _, voted := range rf.votedMe {
-						if voted {
+					for i, voted := range rf.votedMe {
+						if i == rf.me {
+							totalVotes++
+						} else if voted {
 							totalVotes++
 						}
 					}
@@ -545,7 +599,7 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 			if !reply.Success {
 				if reply.Term > rf.currentTerm {
 					originTerm := rf.currentTerm
-					rf.currentTerm = reply.Term
+					rf.updateCurrentTermWithoutLock(reply.Term)
 					changed := rf.changeToFollowerWithoutLock(true)
 					if changed {
 						debugPrintln2B(rf.me, "changed to follower because of append entries in `synchronizeEntriesTo`",
@@ -682,6 +736,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Term:    -1,
 		Command: nil,
 	}
+	rf.readPersist(persister.ReadRaftState())
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(peers))
@@ -697,9 +752,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedMe = make([]bool, len(peers))
 	rf.applyCh = applyCh
 	rf.newCommitCond = sync.NewCond(&rf.mu)
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
