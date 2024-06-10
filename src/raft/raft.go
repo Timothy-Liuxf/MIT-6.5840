@@ -418,6 +418,16 @@ func (rf *Raft) changeToLeaderWithoutLock() {
 	rf.resetNextIndexAndMatchIndexWithoutLock()
 }
 
+func (rf *Raft) changeToCandidateWithoutLock() {
+	rf.role = Candidate
+	rf.currentTerm++
+	debugPrintln2A(rf.me, "current term:", rf.currentTerm, "changed to candidate")
+	rf.votedFor = rf.me
+	rf.resetHeartbeatTimeWithoutLock()
+	rf.votedMe = make([]bool, len(rf.peers))
+	rf.votedMe[rf.me] = true
+}
+
 func (rf *Raft) resetNextIndexAndMatchIndexWithoutLock() {
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
@@ -599,14 +609,7 @@ func (rf *Raft) ticker() {
 			switch rf.role {
 			case Follower, Candidate:
 				if time.Since(rf.lastHeartbeatTime) > rf.heartbeatTimeout {
-					rf.role = Candidate
-					rf.currentTerm++
-					debugPrintln2A(rf.me, "current term:", rf.currentTerm, "changed to candidate")
-					rf.votedFor = rf.me
-					rf.resetHeartbeatTimeWithoutLock()
-					rf.votedMe = make([]bool, len(rf.peers))
-					rf.votedMe[rf.me] = true
-
+					rf.changeToCandidateWithoutLock()
 					debugPrintln2A(rf.me, "started election")
 					rf.RequestVotesFromPeersWithoutLock()
 				}
