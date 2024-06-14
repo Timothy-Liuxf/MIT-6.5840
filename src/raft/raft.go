@@ -257,18 +257,20 @@ func (rf *Raft) saveToSnapshotWithoutLock(index int, term int, snapshot []byte) 
 	rf.lastApplied = maxInt(rf.lastApplied, index)
 }
 
-func (rf *Raft) updateCurrentTermWithoutLock(newTerm int) {
+func (rf *Raft) updateCurrentTermWithoutLock(newTerm int) bool {
 	if newTerm != rf.currentTerm {
 		rf.currentTerm = newTerm
-		rf.persist()
+		return true
 	}
+	return false
 }
 
-func (rf *Raft) updateVotedForWithoutLock(newVotedFor int) {
+func (rf *Raft) updateVotedForWithoutLock(newVotedFor int) bool {
 	if newVotedFor != rf.votedFor {
 		rf.votedFor = newVotedFor
-		rf.persist()
+		return true
 	}
+	return false
 }
 
 // example RequestVote RPC arguments structure.
@@ -306,9 +308,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	debugPrintln2A(rf.me, "received vote request from", args.CandidateId)
 	debugPrintln2B(rf.me, "received vote request from", args.CandidateId, "last log term:", args.LastLogTerm, "last log term this server:", rf.log[len(rf.log)-1].Term)
 	originTerm := rf.currentTerm
+	persist := false
 	if args.Term > originTerm {
 		changed := rf.changeToFollowerWithoutLock(true)
 		rf.updateCurrentTermWithoutLock(args.Term)
+		if !persist {
+			persist = true
+			defer rf.persist()
+		}
 		if changed {
 			debugPrintln2B(rf.me, "changed to follower because of vote request in `RequestVote`",
 				"args.Term:", args.Term, "originTerm:", originTerm)
@@ -328,7 +335,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				return
 			}
 		}
-		rf.updateVotedForWithoutLock(args.CandidateId)
+		votedForChanged := rf.updateVotedForWithoutLock(args.CandidateId)
+		if votedForChanged {
+			if !persist {
+				persist = true
+				defer rf.persist()
+			}
+		}
 		reply.VoteGranted = true
 		debugPrintln2A(rf.me, "voted for", args.CandidateId)
 	}
@@ -388,6 +401,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	argPrevLogActualIndex := rf.toActualIndex(args.PrevLogIndex)
+	persist := false
 	if args.Term < rf.currentTerm || argPrevLogActualIndex < 0 {
 		reply.Success = false
 		reply.ConflictTerm = NULL
@@ -398,8 +412,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			debugPrintln2B(rf.me, "changed to follower because of append entries in `AppendEntries`",
 				"args.Term:", args.Term, "rf.currentTerm:", rf.currentTerm)
 		}
+		if args.Term > rf.currentTerm {
+			if !persist {
+				persist = true
+				defer rf.persist()
+			}
+		}
 		rf.updateCurrentTermWithoutLock(args.Term)
 		rf.resetHeartbeatTimeWithoutLock()
+		if !persist {
+			persist = true
+			defer rf.persist()
+		}
 
 		if argPrevLogActualIndex >= len(rf.log) {
 			reply.ConflictTerm = NULL
@@ -424,7 +448,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					newLog = append(newLog, rf.log[0])
 				}
 				rf.log = newLog
-				rf.persist()
+				if !persist {
+					persist = true
+					defer rf.persist()
+				}
 				reply.Success = true
 				rf.commitIndex = maxInt(minInt(args.LeaderCommit, rf.toLogIndex(len(rf.log)-1)), rf.commitIndex)
 				rf.newCommitCond.Signal()
@@ -559,6 +586,7 @@ func (rf *Raft) changeToCandidateWithoutLock() {
 	rf.currentTerm++
 	debugPrintln2A(rf.me, "current term:", rf.currentTerm, "changed to candidate")
 	rf.updateVotedForWithoutLock(rf.me)
+	rf.persist()
 	rf.resetHeartbeatTimeWithoutLock()
 	rf.votedMe = make([]bool, len(rf.peers))
 	rf.votedMe[rf.me] = true
@@ -602,6 +630,7 @@ func (rf *Raft) RequestVotesFromPeersWithoutLock() {
 							"reply.Term:", reply.Term, "rf.currentTerm:", rf.currentTerm,
 							"reply.LastLogTerm:", reply.LastLogTerm, "rf.log[len(rf.log)-1].Term:", rf.log[len(rf.log)-1].Term)
 					}
+					rf.persist()
 					return
 				}
 				if reply.VoteGranted {
@@ -694,6 +723,7 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 						debugPrintln2B(rf.me, "changed to follower because of append entries in `synchronizeEntriesTo`",
 							"reply.Term:", reply.Term, "rf.currentTerm:", originTerm)
 					}
+					rf.persist()
 				} else {
 					firstConflictActualIndex := rf.toActualIndex(reply.FirstConflictIndex)
 					if firstConflictActualIndex >= len(rf.log) {
@@ -762,6 +792,7 @@ func (rf *Raft) ticker() {
 					if changed {
 						debugPrintln2B(rf.me, "changed to follower because of heartbeat timeout in `ticker` at:", time.Now().UnixMilli())
 					}
+					rf.persist()
 					break
 				}
 				rf.sendHeartbeatsWithoutLock()
