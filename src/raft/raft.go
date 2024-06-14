@@ -621,6 +621,9 @@ func (rf *Raft) RequestVotesFromPeersWithoutLock() {
 				defer rf.mu.Unlock()
 
 				rf.lastAckTime[server] = time.Now()
+				if args.Term != rf.currentTerm {
+					return
+				}
 				if reply.Term > rf.currentTerm || (reply.Term == rf.currentTerm && reply.LastLogTerm > rf.log[len(rf.log)-1].Term) {
 					rf.updateCurrentTermWithoutLock(reply.Term)
 					changed := rf.changeToFollowerWithoutLock(true)
