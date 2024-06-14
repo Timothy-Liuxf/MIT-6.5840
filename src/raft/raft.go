@@ -533,9 +533,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	rf.saveToSnapshotWithoutLock(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
-	rf.persist()
-	// TODO: notify new snapshot
-	rf.newCommitCond.Signal()
+	defer rf.persist()
+	applyMsg := ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	go func() {
+		rf.applyCh <- applyMsg
+	}()
 	reply.Success = true
 }
 
@@ -686,6 +694,10 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
+		if rf.role != Leader {
+			return AppendEntriesArgs{}, false
+		}
+
 		nextIndex := rf.nextIndex[server]
 		nextActualIndex := rf.toActualIndex(nextIndex)
 		if nextActualIndex > len(rf.log) {
@@ -829,9 +841,10 @@ func (rf *Raft) applyNewCommitEntries() {
 		endActualIndex = minInt(commitActualIndex, len(rf.log)-1)
 		for i := lastAppliedActualIndex + 1; i <= endActualIndex; i++ {
 			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
+				CommandValid:  true,
+				Command:       rf.log[i].Command,
+				CommandIndex:  i,
+				SnapshotValid: false,
 			}
 			debugPrintln2B(rf.me, "applied command:", rf.log[i].Command)
 		}
