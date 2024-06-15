@@ -40,6 +40,10 @@ func debugPrintln2C(args ...interface{}) {
 	// fmt.Println(args...)
 }
 
+func debugPrintln2D(args ...interface{}) {
+	// fmt.Println(args...)
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -128,6 +132,8 @@ type Raft struct {
 	applyCh           chan<- ApplyMsg
 	newCommitCond     *sync.Cond
 	snapshot          Snapshot
+	requestSeq        int // For debug
+	hasNewSnapshot    bool
 }
 
 func (rf *Raft) resetHeartbeatTimeWithoutLock() {
@@ -224,6 +230,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.commitIndex = maxInt(rf.commitIndex, lastIncludedIndex)
 	rf.lastApplied = maxInt(rf.lastApplied, lastIncludedIndex)
+	debugPrintln2D(rf.me, "set lastApplied to", rf.lastApplied, "current commitIndex:", rf.commitIndex, "in `readPersist`")
 }
 
 // the service says it has created a snapshot that has
@@ -234,6 +241,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	debugPrintln2D(rf.me, "prepare to take snapshot at", index)
 	// index++ // Do not need to skip sentinel, which is defined in `Start()`
 	actualIndex := rf.toActualIndex(index)
 	if actualIndex < 0 {
@@ -242,19 +250,29 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		actualIndex = len(rf.log) - 1
 		index = rf.toLogIndex(actualIndex)
 	}
+	debugPrintln2D(rf.me, "take snapshot at", index)
 	rf.saveToSnapshotWithoutLock(index, rf.log[actualIndex].Term, snapshot)
 	rf.persist()
 }
 
 func (rf *Raft) saveToSnapshotWithoutLock(index int, term int, snapshot []byte) {
-	rf.log = rf.log[rf.toActualIndex(index):]
+	rf.log = rf.log[minInt(rf.toActualIndex(index), len(rf.log)):]
+	if len(rf.log) == 0 {
+		rf.log = append(rf.log, LogEntry{
+			Term:    term,
+			Command: nil,
+		}) // Add sentinel
+	} else {
+		rf.log[0].Term = term // The sentinel must be updated since it may not be correct
+	}
 	rf.snapshot = Snapshot{
 		LastIncludedIndex: index,
 		LastIncludedTerm:  term,
 		Data:              snapshot,
 	}
 	rf.commitIndex = maxInt(rf.commitIndex, index)
-	rf.lastApplied = maxInt(rf.lastApplied, index)
+	// rf.lastApplied = maxInt(rf.lastApplied, index)
+	debugPrintln2D(rf.me, "lastApplied:", rf.lastApplied, "current commitIndex:", rf.commitIndex, "in `saveToSnapshotWithoutLock`")
 }
 
 func (rf *Raft) updateCurrentTermWithoutLock(newTerm int) bool {
@@ -386,6 +404,7 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	LogEntries   []LogEntry
 	LeaderCommit int
+	RequestSeq   int
 }
 
 type AppendEntriesReply struct {
@@ -402,15 +421,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	argPrevLogActualIndex := rf.toActualIndex(args.PrevLogIndex)
 	persist := false
-	if args.Term < rf.currentTerm || argPrevLogActualIndex < 0 {
+	debugPrintln2D(rf.me, "received append entries from", args.LeaderId, "args:", args, "log:", rf.log, "RequestSeq:", args.RequestSeq)
+	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.ConflictTerm = NULL
 		reply.FirstConflictIndex = rf.toLogIndex(0)
+		debugPrintln2D(rf.me, "received append entries with outdated term in `AppendEntries`", "RequestSeq:", args.RequestSeq)
+	} else if argPrevLogActualIndex < 0 {
+		reply.Success = false
+		reply.ConflictTerm = NULL
+		reply.FirstConflictIndex = rf.toLogIndex(argPrevLogActualIndex)
+		debugPrintln2D(rf.me, "received append entries with outdated prev log index in `AppendEntries`", "RequestSeq:", args.RequestSeq)
 	} else {
 		changed := rf.changeToFollowerWithoutLock(args.Term > rf.currentTerm)
 		if changed {
 			debugPrintln2B(rf.me, "changed to follower because of append entries in `AppendEntries`",
-				"args.Term:", args.Term, "rf.currentTerm:", rf.currentTerm)
+				"args.Term:", args.Term, "rf.currentTerm:", rf.currentTerm, "RequestSeq:", args.RequestSeq)
 		}
 		if args.Term > rf.currentTerm {
 			if !persist {
@@ -426,11 +452,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		if argPrevLogActualIndex >= len(rf.log) {
+			debugPrintln2D(rf.me, "prev log index out of range in `AppendEntries`",
+				"RequestSeq:", args.RequestSeq,
+				"argPrevLogActualIndex:", argPrevLogActualIndex,
+				"len(rf.log):", len(rf.log),
+				"args.PrevLogIndex:", args.PrevLogIndex,
+				"last included index:", rf.snapshot.LastIncludedIndex,
+				"log:", rf.log,
+			)
 			reply.ConflictTerm = NULL
 			reply.FirstConflictIndex = rf.toLogIndex(len(rf.log))
 			reply.Success = false
 		} else {
 			if rf.log[argPrevLogActualIndex].Term != args.PrevLogTerm {
+				debugPrintln2D(rf.me, "prev log term mismatch in `AppendEntries`",
+					"RequestSeq:", args.RequestSeq,
+					"argPrevLogActualIndex:", argPrevLogActualIndex,
+					"args.PrevLogTerm:", args.PrevLogTerm,
+					"rf.log[argPrevLogActualIndex].Term:", rf.log[argPrevLogActualIndex].Term)
 				conflictTerm := rf.log[argPrevLogActualIndex].Term
 				firstConflictActualIndex := argPrevLogActualIndex
 				for i := argPrevLogActualIndex - 1; i >= 0; i-- {
@@ -455,7 +494,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.Success = true
 				rf.commitIndex = maxInt(minInt(args.LeaderCommit, rf.toLogIndex(len(rf.log)-1)), rf.commitIndex)
 				rf.newCommitCond.Signal()
-				debugPrintln2B(rf.me, "received log entries from", args.LeaderId, ":", args.LogEntries)
+				debugPrintln2B(rf.me, "received and accepted log entries from", args.LeaderId, ":", args.LogEntries,
+					"RequestSeq:", args.RequestSeq, "current log:", rf.log)
 			}
 		}
 	}
@@ -490,7 +530,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	debugPrintln2B(rf.me, "start agreement on command:", command)
 
-	index := len(rf.log)
+	index := rf.toLogIndex(len(rf.log))
 	term := rf.currentTerm
 	rf.log = append(rf.log, LogEntry{
 		Term:    term,
@@ -520,31 +560,42 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	rf.resetHeartbeatTimeWithoutLock()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
-	rf.changeToFollowerWithoutLock(args.Term > rf.currentTerm)
+	changed := rf.changeToFollowerWithoutLock(args.Term > rf.currentTerm)
+	if changed {
+		debugPrintln2B(rf.me, "changed to follower because of install snapshot in `InstallSnapshot`",
+			"args.Term:", args.Term, "rf.currentTerm:", rf.currentTerm)
+	}
+	persist := false
+	if args.Term > rf.currentTerm {
+		persist = true
+		defer rf.persist()
+	}
 	rf.updateCurrentTermWithoutLock(args.Term)
-	rf.resetHeartbeatTimeWithoutLock()
+	debugPrintln2D(rf.me, "received install snapshot from", args.LeaderId,
+		"last included index:", args.LastIncludedIndex, "last included term:", args.LastIncludedTerm)
 	if args.LastIncludedIndex <= rf.snapshot.LastIncludedIndex {
 		reply.Success = true
 		return
 	}
 	rf.saveToSnapshotWithoutLock(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
-	defer rf.persist()
-	applyMsg := ApplyMsg{
-		CommandValid:  false,
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex,
+	if !persist {
+		persist = true
+		defer rf.persist()
 	}
-	go func() {
-		rf.applyCh <- applyMsg
-	}()
+	rf.hasNewSnapshot = true
+	rf.newCommitCond.Signal()
 	reply.Success = true
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -690,89 +741,150 @@ func (rf *Raft) synchronizeEntriesWithoutLock() {
 }
 
 func (rf *Raft) synchronizeEntriesTo(server int) {
-	args, valid := func() (AppendEntriesArgs, bool) {
+	appendArgs, installArgs, isInstall, valid := func() (AppendEntriesArgs, InstallSnapshotArgs, bool, bool) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
 		if rf.role != Leader {
-			return AppendEntriesArgs{}, false
+			return AppendEntriesArgs{}, InstallSnapshotArgs{}, false, false
 		}
 
-		nextIndex := rf.nextIndex[server]
-		nextActualIndex := rf.toActualIndex(nextIndex)
-		if nextActualIndex > len(rf.log) {
-			nextActualIndex = len(rf.log)
-			nextIndex = rf.toLogIndex(nextActualIndex)
+		debugPrintln2D(rf.me, "synchronize entries to", server,
+			"nextIndex:", rf.nextIndex[server],
+			"lastIncludedIndex:", rf.snapshot.LastIncludedIndex,
+			"current log:", rf.log,
+		)
+		if rf.nextIndex[server] <= rf.snapshot.LastIncludedIndex {
+			installArgs := InstallSnapshotArgs{}
+			installArgs.Term = rf.currentTerm
+			installArgs.LeaderId = rf.me
+			installArgs.LastIncludedIndex = rf.snapshot.LastIncludedIndex
+			installArgs.LastIncludedTerm = rf.snapshot.LastIncludedTerm
+			installArgs.Data = rf.snapshot.Data
+			return AppendEntriesArgs{}, installArgs, true, true
+		} else {
+			nextIndex := rf.nextIndex[server]
+			nextActualIndex := rf.toActualIndex(nextIndex)
+			if nextActualIndex > len(rf.log) {
+				nextActualIndex = len(rf.log)
+				nextIndex = rf.toLogIndex(nextActualIndex)
+			}
+			appendArgs := AppendEntriesArgs{}
+			appendArgs.Term = rf.currentTerm
+			appendArgs.LeaderId = rf.me
+			appendArgs.PrevLogIndex = nextIndex - 1
+			appendArgs.PrevLogTerm = rf.log[nextActualIndex-1].Term
+			appendArgs.LogEntries = rf.log[nextActualIndex:]
+			appendArgs.LeaderCommit = rf.commitIndex
+			appendArgs.RequestSeq = rf.requestSeq
+			rf.requestSeq++
+			return appendArgs, InstallSnapshotArgs{}, false, true
 		}
-		args := AppendEntriesArgs{}
-		args.Term = rf.currentTerm
-		args.LeaderId = rf.me
-		args.PrevLogIndex = nextIndex - 1
-		args.PrevLogTerm = rf.log[nextActualIndex-1].Term
-		args.LogEntries = rf.log[nextActualIndex:]
-		args.LeaderCommit = rf.commitIndex
-		return args, true
 	}()
 	if !valid {
 		return
 	}
 
-	reply := AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, &args, &reply)
-	if ok {
-		func() {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
+	if isInstall {
+		debugPrintln2D(rf.me, "send install snapshot to", server)
+		reply := InstallSnapshotReply{}
+		ok := rf.sendInstallSnapshot(server, &installArgs, &reply)
+		if ok {
+			func() {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 
-			rf.lastAckTime[server] = time.Now()
-			debugPrintln2B(rf.me, "received reply from", server, "at time in millisecond:", rf.lastAckTime[server].UnixMilli())
-			if args.Term != rf.currentTerm {
-				return
-			}
-			if !reply.Success {
-				if reply.Term > rf.currentTerm {
-					originTerm := rf.currentTerm
-					rf.updateCurrentTermWithoutLock(reply.Term)
-					changed := rf.changeToFollowerWithoutLock(true)
-					if changed {
-						debugPrintln2B(rf.me, "changed to follower because of append entries in `synchronizeEntriesTo`",
-							"reply.Term:", reply.Term, "rf.currentTerm:", originTerm)
+				rf.lastAckTime[server] = time.Now()
+				debugPrintln2D(rf.me, "received reply of install snapshot from", server) // , "at time in millisecond:", rf.lastAckTime[server].UnixMilli())
+				if installArgs.Term != rf.currentTerm {
+					return
+				}
+				if !reply.Success {
+					if reply.Term > rf.currentTerm {
+						originTerm := rf.currentTerm
+						rf.updateCurrentTermWithoutLock(reply.Term)
+						changed := rf.changeToFollowerWithoutLock(true)
+						rf.resetHeartbeatTimeWithoutLock() // TARGET: in case this server will start election immediately
+						if changed {
+							debugPrintln2D(rf.me, "changed to follower because of install snapshot in `synchronizeEntriesTo`",
+								"reply.Term:", reply.Term, "rf.currentTerm:", originTerm)
+						}
+						rf.persist()
+					} else {
+						debugPrintln2D(rf.me, "install snapshot failed and this should not happen")
 					}
-					rf.persist()
 				} else {
-					firstConflictActualIndex := rf.toActualIndex(reply.FirstConflictIndex)
-					if firstConflictActualIndex >= len(rf.log) {
-						firstConflictActualIndex = maxInt(minInt(len(rf.log)-1, args.PrevLogIndex), 1)
-					} else if rf.log[firstConflictActualIndex].Term == reply.ConflictTerm {
-						for i := firstConflictActualIndex - 1; i >= 0; i-- {
-							if rf.log[i].Term != reply.ConflictTerm {
-								firstConflictActualIndex = i + 1
-								break
+					newNextIndex := maxInt(installArgs.LastIncludedIndex+1, rf.nextIndex[server])
+					rf.nextIndex[server] = newNextIndex
+					rf.matchIndex[server] = newNextIndex - 1
+					// QUESTION: broadcast to all peers or just the one that needs to install snapshot?
+					go rf.synchronizeEntriesTo(server)
+					// rf.synchronizeEntriesWithoutLock()
+				}
+			}()
+		}
+	} else {
+		debugPrintln2D(appendArgs.LeaderId, "send append entries to", server, "args:", appendArgs, "RequestSeq:", appendArgs.RequestSeq)
+		reply := AppendEntriesReply{}
+		ok := rf.sendAppendEntries(server, &appendArgs, &reply)
+		if ok {
+			func() {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				rf.lastAckTime[server] = time.Now()
+				debugPrintln2B(rf.me, "received reply from", server, "RequestSeq:", appendArgs.RequestSeq) // , "at time in millisecond:", rf.lastAckTime[server].UnixMilli())
+				if appendArgs.Term != rf.currentTerm {
+					return
+				}
+				if !reply.Success {
+					if reply.Term > rf.currentTerm {
+						originTerm := rf.currentTerm
+						rf.updateCurrentTermWithoutLock(reply.Term)
+						changed := rf.changeToFollowerWithoutLock(true)
+						rf.resetHeartbeatTimeWithoutLock() // TARGET: in case this server will start election immediately
+						if changed {
+							debugPrintln2B(rf.me, "changed to follower because of append entries in `synchronizeEntriesTo`",
+								"reply.Term:", reply.Term, "rf.currentTerm:", originTerm)
+						}
+						rf.persist()
+					} else {
+						firstConflictActualIndex := rf.toActualIndex(reply.FirstConflictIndex)
+						if firstConflictActualIndex >= len(rf.log) {
+							firstConflictActualIndex = maxInt(minInt(len(rf.log)-1, appendArgs.PrevLogIndex), 1)
+						} else if firstConflictActualIndex <= 0 {
+							// Should send snapshot
+						} else if rf.log[firstConflictActualIndex].Term == reply.ConflictTerm {
+							for i := firstConflictActualIndex - 1; i >= 0; i-- {
+								if rf.log[i].Term != reply.ConflictTerm {
+									firstConflictActualIndex = i + 1
+									break
+								}
 							}
 						}
+						rf.nextIndex[server] = rf.toLogIndex(firstConflictActualIndex)
+						go rf.synchronizeEntriesTo(server)
 					}
-					rf.nextIndex[server] = rf.toLogIndex(maxInt(firstConflictActualIndex, 1))
-					go rf.synchronizeEntriesTo(server)
-				}
-			} else {
-				newNextIndex := maxInt(args.PrevLogIndex+1+len(args.LogEntries), 1)
-				newMatchIndex := newNextIndex - 1
-				rf.nextIndex[server] = newNextIndex
-				rf.matchIndex[server] = newMatchIndex
+				} else {
+					newNextIndex := maxInt(appendArgs.PrevLogIndex+1+len(appendArgs.LogEntries), 1)
+					newMatchIndex := newNextIndex - 1
+					rf.nextIndex[server] = newNextIndex
+					rf.matchIndex[server] = newMatchIndex
 
-				matchCount := 0
-				for _, matchIndex := range rf.matchIndex {
-					if matchIndex >= newMatchIndex {
-						matchCount++
+					matchCount := 0
+					for _, matchIndex := range rf.matchIndex {
+						if matchIndex >= newMatchIndex {
+							matchCount++
+						}
+					}
+					if matchCount > len(rf.peers)/2 && newMatchIndex > rf.commitIndex {
+						rf.commitIndex = maxInt(newMatchIndex, rf.commitIndex)
+						rf.newCommitCond.Signal()
+						rf.synchronizeEntriesWithoutLock()
 					}
 				}
-				if matchCount > len(rf.peers)/2 && newMatchIndex > rf.commitIndex {
-					rf.commitIndex = maxInt(newMatchIndex, rf.commitIndex)
-					rf.newCommitCond.Signal()
-					rf.synchronizeEntriesWithoutLock()
-				}
-			}
-		}()
+			}()
+		}
 	}
 }
 
@@ -796,13 +908,18 @@ func (rf *Raft) ticker() {
 			debugPrintln2B(rf.me, "current term:", rf.currentTerm, "current log:", rf.log)
 			switch rf.role {
 			case Follower, Candidate:
+				debugPrintln2D(rf.me, "as follower or candidate start ticker")
 				if time.Since(rf.lastHeartbeatTime) > rf.heartbeatTimeout {
+					debugPrintln2D(rf.me, "heartbeat timeout")
 					rf.changeToCandidateWithoutLock()
 					debugPrintln2A(rf.me, "started election")
 					rf.RequestVotesFromPeersWithoutLock()
 				}
+				debugPrintln2D(rf.me, "as follower or candidate end ticker")
 			case Leader:
+				debugPrintln2D(rf.me, "as leader start ticker")
 				if !rf.enoughActivePeersWithoutLock() {
+					debugPrintln2D(rf.me, "not enough active peers")
 					changed := rf.changeToFollowerWithoutLock(true)
 					if changed {
 						debugPrintln2B(rf.me, "changed to follower because of heartbeat timeout in `ticker` at:", time.Now().UnixMilli())
@@ -810,7 +927,9 @@ func (rf *Raft) ticker() {
 					rf.persist()
 					break
 				}
+				debugPrintln2D(rf.me, "send heartbeats")
 				rf.sendHeartbeatsWithoutLock()
+				debugPrintln2D(rf.me, "as leader end ticker")
 			}
 		}()
 		ms := BASIC_SLEEP_DURATION + (rand.Int63() % SLEEP_JITTER)
@@ -825,7 +944,7 @@ func (rf *Raft) applyNewCommitEntries() {
 		commitActualIndex := rf.toActualIndex(rf.commitIndex)
 		lastAppliedActualIndex := rf.toActualIndex(rf.lastApplied)
 		endActualIndex := minInt(commitActualIndex, len(rf.log)-1)
-		for !rf.killed() && lastAppliedActualIndex >= endActualIndex {
+		for !rf.killed() && lastAppliedActualIndex >= endActualIndex && !rf.hasNewSnapshot {
 			rf.newCommitCond.Wait()
 			debugPrintln2B(rf.me, "wake up")
 			debugPrintln2B(rf.me, "lastApplied:", rf.lastApplied, "commitIndex:", rf.commitIndex)
@@ -836,19 +955,50 @@ func (rf *Raft) applyNewCommitEntries() {
 		if rf.killed() {
 			return
 		}
-		debugPrintln2B(rf.me, "apply new commit entries")
-
-		endActualIndex = minInt(commitActualIndex, len(rf.log)-1)
-		for i := lastAppliedActualIndex + 1; i <= endActualIndex; i++ {
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       rf.log[i].Command,
-				CommandIndex:  i,
-				SnapshotValid: false,
+		if rf.hasNewSnapshot {
+			debugPrintln2D(rf.me, "apply new snapshot")
+			if rf.snapshot.LastIncludedIndex <= rf.lastApplied {
+				debugPrintln2D(rf.me, "skip snapshot at index:", rf.snapshot.LastIncludedIndex, "lastApplied:", rf.lastApplied, "commitIndex:", rf.commitIndex)
+				rf.hasNewSnapshot = false
+			} else {
+				applyMsg := ApplyMsg{
+					CommandValid:  false,
+					SnapshotValid: true,
+					Snapshot:      rf.snapshot.Data,
+					SnapshotTerm:  rf.snapshot.LastIncludedTerm,
+					SnapshotIndex: rf.snapshot.LastIncludedIndex,
+				}
+				rf.mu.Unlock()
+				rf.applyCh <- applyMsg
+				rf.mu.Lock()
+				rf.hasNewSnapshot = false
+				rf.lastApplied = maxInt(rf.lastApplied, applyMsg.SnapshotIndex)
+				debugPrintln2D(rf.me, "applied snapshot at index:", rf.snapshot.LastIncludedIndex, "lastApplied:", rf.lastApplied, "commitIndex:", rf.commitIndex)
 			}
-			debugPrintln2B(rf.me, "applied command:", rf.log[i].Command)
+		} else {
+			debugPrintln2B(rf.me, "apply new commit entries")
+
+			endActualIndex = minInt(commitActualIndex, len(rf.log)-1)
+			endIndex := rf.toLogIndex(endActualIndex)
+			applyMsgs := make([]ApplyMsg, 0)
+			for i := lastAppliedActualIndex + 1; i <= endActualIndex; i++ {
+				applyMsgs = append(applyMsgs, ApplyMsg{
+					CommandValid:  true,
+					Command:       rf.log[i].Command,
+					CommandIndex:  rf.toLogIndex(i),
+					SnapshotValid: false,
+				})
+			}
+			rf.mu.Unlock()
+			for _, applyMsg := range applyMsgs {
+				rf.applyCh <- applyMsg
+				debugPrintln2B(rf.me, "applied command:", applyMsg.Command, "at index:", applyMsg.CommandIndex)
+			}
+			rf.mu.Lock()
+			rf.lastApplied = maxInt(endIndex, rf.lastApplied)
 		}
-		rf.lastApplied = rf.toLogIndex(maxInt(endActualIndex, rf.lastApplied))
+		debugPrintln2D(rf.me, "set lastApplied to", rf.lastApplied, "current commitIndex:", rf.commitIndex, "in `applyNewCommitEntries`",
+			"lastAppliedActualIndex:", lastAppliedActualIndex, "endActualIndex:", endActualIndex)
 	}
 }
 
@@ -897,6 +1047,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedMe = make([]bool, len(peers))
 	rf.applyCh = applyCh
 	rf.newCommitCond = sync.NewCond(&rf.mu)
+	rf.requestSeq = 0
+	// QUESTION: Check rf.snapshot.Data as below will be wrong, but I don't know why
+	// rf.hasNewSnapshot = rf.snapshot.LastIncludedTerm != NULL
+	rf.hasNewSnapshot = false
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
