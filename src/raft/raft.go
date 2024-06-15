@@ -482,15 +482,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.FirstConflictIndex = rf.toLogIndex(maxInt(firstConflictActualIndex, 1))
 				reply.Success = false
 			} else {
-				newLog := append(rf.log[:argPrevLogActualIndex+1], args.LogEntries...)
-				if len(newLog) == 0 {
-					newLog = append(newLog, rf.log[0])
+				for i, logEntry := range args.LogEntries {
+					if argPrevLogActualIndex+i+1 >= len(rf.log) || logEntry.Term != rf.log[argPrevLogActualIndex+i+1].Term {
+						newLog := append(rf.log[:argPrevLogActualIndex+i+1], args.LogEntries[i:]...)
+						if len(newLog) == 0 {
+							newLog = append(newLog, rf.log[0])
+						}
+						rf.log = newLog
+						if !persist {
+							persist = true
+							defer rf.persist()
+						}
+						break
+					}
 				}
-				rf.log = newLog
-				if !persist {
-					persist = true
-					defer rf.persist()
-				}
+
 				reply.Success = true
 				rf.commitIndex = maxInt(minInt(args.LeaderCommit, rf.toLogIndex(len(rf.log)-1)), rf.commitIndex)
 				rf.newCommitCond.Signal()
