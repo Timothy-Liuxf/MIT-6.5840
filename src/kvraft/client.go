@@ -3,6 +3,7 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"sync/atomic"
 
 	"6.5840/labrpc"
 )
@@ -10,6 +11,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId    int64
+	opSeq      int64
+	lastLeader int64
 }
 
 func nrand() int64 {
@@ -19,10 +23,24 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) allocNewOpSeq() int64 {
+	return atomic.AddInt64(&ck.opSeq, 1)
+}
+
+func (ck *Clerk) getLastLeader() int64 {
+	return atomic.LoadInt64(&ck.lastLeader)
+}
+
+func (ck *Clerk) setLastLeader(lastLeader int64) {
+	atomic.StoreInt64(&ck.lastLeader, lastLeader)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clerkId = nrand()
+	ck.opSeq = 0
 	return ck
 }
 
@@ -37,9 +55,22 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key:     key,
+		ClerkId: ck.clerkId,
+		OpSeq:   ck.allocNewOpSeq(),
+	}
+	for {
+		lastLeader := int(ck.getLastLeader())
+		for i := 0; i < len(ck.servers); i++ {
+			leader := (i + lastLeader) % len(ck.servers)
+			reply := GetReply{}
+			if ck.servers[leader].Call("KVServer.Get", &args, &reply) && reply.Err == OK {
+				ck.setLastLeader(int64(leader))
+				return reply.Value
+			}
+		}
+	}
 }
 
 // shared by Put and Append.
@@ -51,7 +82,24 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:     key,
+		Value:   value,
+		Op:      op,
+		ClerkId: ck.clerkId,
+		OpSeq:   ck.allocNewOpSeq(),
+	}
+	for {
+		lastLeader := int(ck.getLastLeader())
+		for i := 0; i < len(ck.servers); i++ {
+			leader := (i + lastLeader) % len(ck.servers)
+			reply := PutAppendReply{}
+			if ck.servers[leader].Call("KVServer.PutAppend", &args, &reply) && reply.Err == OK {
+				ck.setLastLeader(int64(leader))
+				return
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
