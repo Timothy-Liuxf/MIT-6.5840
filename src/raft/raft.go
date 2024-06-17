@@ -987,7 +987,7 @@ func (rf *Raft) applyNewCommitEntries() {
 			endActualIndex = minInt(commitActualIndex, len(rf.log)-1)
 			endIndex := rf.toLogIndex(endActualIndex)
 			applyMsgs := make([]ApplyMsg, 0)
-			for i := lastAppliedActualIndex + 1; i <= endActualIndex; i++ {
+			for i := maxInt(lastAppliedActualIndex+1, 1); i <= endActualIndex; i++ {
 				applyMsgs = append(applyMsgs, ApplyMsg{
 					CommandValid:  true,
 					Command:       rf.log[i].Command,
