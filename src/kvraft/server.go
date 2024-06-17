@@ -47,7 +47,6 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
 	kvStore        map[string]string
 	maxAppliedSeqs map[int64]int64
 	timeOut        map[int64]map[int64]bool

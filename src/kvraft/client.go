@@ -9,8 +9,7 @@ import (
 )
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers    []*labrpc.ClientEnd
 	clerkId    int64
 	opSeq      int64
 	lastLeader int64
@@ -38,7 +37,6 @@ func (ck *Clerk) setLastLeader(lastLeader int64) {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
 	ck.clerkId = nrand()
 	ck.opSeq = 0
 	return ck
