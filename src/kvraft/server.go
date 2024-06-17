@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ type KVServer struct {
 	timeOut        map[int64]map[int64]bool
 	waitCond       map[int64]*sync.Cond
 	killCh         chan int
+	persister      *raft.Persister
 }
 
 func maxInt64(a, b int64) int64 {
@@ -72,7 +74,15 @@ func (kv *KVServer) NewClerkWithoutLock(ClerkId int64) {
 	_, ok := kv.maxAppliedSeqs[ClerkId]
 	if !ok {
 		kv.maxAppliedSeqs[ClerkId] = 0
+	}
+
+	_, ok = kv.timeOut[ClerkId]
+	if !ok {
 		kv.timeOut[ClerkId] = make(map[int64]bool)
+	}
+
+	_, ok = kv.waitCond[ClerkId]
+	if !ok {
 		kv.waitCond[ClerkId] = sync.NewCond(&kv.mu)
 	}
 }
@@ -104,7 +114,7 @@ func (kv *KVServer) ExecuteOpWithoutLock(op Op) Err {
 			kv.waitCond[op.ClerkId].Wait()
 		}
 
-		if kv.timeOut[op.ClerkId][op.OpSeq] {
+		if op.OpSeq > kv.maxAppliedSeqs[op.ClerkId] { // Timeout
 			return ErrTimeout
 		}
 	}
@@ -178,34 +188,82 @@ func (kv *KVServer) ReceiveRaftApply() {
 		case <-kv.killCh:
 			return
 		case msg := <-kv.applyCh:
-			if msg.CommandValid {
-				op := msg.Command.(Op)
+			if msg.SnapshotValid {
 				func() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
-
-					DPrintln(kv.me, "Apply", op.ClerkId, op.OpSeq, op)
-					clerkId := op.ClerkId
-					kv.NewClerkWithoutLock(clerkId)
-					if op.OpSeq > kv.maxAppliedSeqs[clerkId] {
-						if op.Op == "Put" || op.Op == "Append" {
-							value, ok := kv.kvStore[op.Key]
-							if !ok {
-								value = ""
-							}
-							if op.Op == "Put" {
-								kv.kvStore[op.Key] = op.Value
-							} else {
-								kv.kvStore[op.Key] = value + op.Value
-							}
-						}
-						kv.maxAppliedSeqs[clerkId] = op.OpSeq
+					kv.ReadSnapshotWithoutLock(msg.Snapshot)
+					for _, cond := range kv.waitCond {
+						cond.Broadcast()
 					}
-					kv.waitCond[clerkId].Broadcast() // QUESTION: this broadcast might be moved into the if block
 				}()
+			}
+			if msg.CommandValid {
+				// msg.Command == nil means this log has been included in the snapshot and it is commited at rf.log[0]
+				if msg.Command != nil {
+					op := msg.Command.(Op)
+					func() {
+						kv.mu.Lock()
+						defer kv.mu.Unlock()
+
+						DPrintln(kv.me, "Apply", op.ClerkId, op.OpSeq, op)
+						clerkId := op.ClerkId
+						kv.NewClerkWithoutLock(clerkId)
+						if op.OpSeq > kv.maxAppliedSeqs[clerkId] {
+							if op.Op == "Put" || op.Op == "Append" {
+								value, ok := kv.kvStore[op.Key]
+								if !ok {
+									value = ""
+								}
+								if op.Op == "Put" {
+									kv.kvStore[op.Key] = op.Value
+								} else {
+									kv.kvStore[op.Key] = value + op.Value
+								}
+							}
+							kv.maxAppliedSeqs[clerkId] = op.OpSeq
+						}
+						kv.waitCond[clerkId].Broadcast() // QUESTION: this broadcast might be moved into the if block
+
+						if kv.maxraftstate != -1 && float64(kv.persister.RaftStateSize()) >= 0.8*float64(kv.maxraftstate) {
+							kv.SaveToSnapshotWithoutLock(msg.CommandIndex)
+						}
+					}()
+				}
 			}
 		}
 	}
+}
+
+func (kv *KVServer) SaveToSnapshotWithoutLock(index int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	if err := e.Encode(kv.kvStore); err != nil {
+		panic("Failed to encode kvStore: " + err.Error())
+	}
+	if err := e.Encode(kv.maxAppliedSeqs); err != nil {
+		panic("Failed to encode maxAppliedSeqs: " + err.Error())
+	}
+
+	kv.rf.Snapshot(index, w.Bytes())
+}
+
+func (kv *KVServer) ReadSnapshotWithoutLock(snapshot []byte) {
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var kvStore map[string]string
+	var maxAppliedSeqs map[int64]int64
+	if err := d.Decode(&kvStore); err != nil {
+		panic("Failed to decode kvStore: " + err.Error())
+	}
+	if err := d.Decode(&maxAppliedSeqs); err != nil {
+		panic("Failed to decode maxAppliedSeqs: " + err.Error())
+	}
+
+	kv.kvStore = kvStore
+	kv.maxAppliedSeqs = maxAppliedSeqs
 }
 
 // servers[] contains the ports of the set of
@@ -238,6 +296,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.timeOut = make(map[int64]map[int64]bool)
 	kv.waitCond = make(map[int64]*sync.Cond)
 	kv.killCh = make(chan int, 1)
+	kv.persister = persister
+
+	if maxraftstate != -1 && persister.SnapshotSize() > 0 {
+		kv.ReadSnapshotWithoutLock(persister.ReadSnapshot())
+	}
 
 	go kv.ReceiveRaftApply()
 
