@@ -766,7 +766,8 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 			installArgs.LeaderId = rf.me
 			installArgs.LastIncludedIndex = rf.snapshot.LastIncludedIndex
 			installArgs.LastIncludedTerm = rf.snapshot.LastIncludedTerm
-			installArgs.Data = rf.snapshot.Data
+			installArgs.Data = make([]byte, len(rf.snapshot.Data))
+			copy(installArgs.Data, rf.snapshot.Data)
 			return AppendEntriesArgs{}, installArgs, true, true
 		} else {
 			nextIndex := rf.nextIndex[server]
@@ -780,7 +781,8 @@ func (rf *Raft) synchronizeEntriesTo(server int) {
 			appendArgs.LeaderId = rf.me
 			appendArgs.PrevLogIndex = nextIndex - 1
 			appendArgs.PrevLogTerm = rf.log[nextActualIndex-1].Term
-			appendArgs.LogEntries = rf.log[nextActualIndex:]
+			appendArgs.LogEntries = make([]LogEntry, len(rf.log[nextActualIndex:]))
+			copy(appendArgs.LogEntries, rf.log[nextActualIndex:])
 			appendArgs.LeaderCommit = rf.commitIndex
 			appendArgs.RequestSeq = rf.requestSeq
 			rf.requestSeq++
