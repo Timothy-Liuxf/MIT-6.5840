@@ -138,10 +138,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	value, ok := kv.kvStore[args.Key]
 	if !ok {
-		value = ""
+		reply.Value = ""
+		reply.Err = ErrNoKey
+	} else {
+		reply.Value = value
+		reply.Err = OK
 	}
-	reply.Err = OK
-	reply.Value = value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {

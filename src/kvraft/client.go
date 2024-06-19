@@ -63,7 +63,7 @@ func (ck *Clerk) Get(key string) string {
 		for i := 0; i < len(ck.servers); i++ {
 			leader := (i + lastLeader) % len(ck.servers)
 			reply := GetReply{}
-			if ck.servers[leader].Call("KVServer.Get", &args, &reply) && reply.Err == OK {
+			if ck.servers[leader].Call("KVServer.Get", &args, &reply) && (reply.Err == OK || reply.Err == ErrNoKey) {
 				ck.setLastLeader(int64(leader))
 				return reply.Value
 			}
