@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"crypto/rand"
 	"math/big"
+	"sync/atomic"
 	"time"
 
 	"6.5840/labrpc"
@@ -14,7 +15,8 @@ import (
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// Your data here.
+	clerkId int64
+	opSeq   int64
 }
 
 func nrand() int64 {
@@ -24,16 +26,22 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) allocNewOpSeq() int64 {
+	return atomic.AddInt64(&ck.opSeq, 1)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// Your code here.
+	ck.clerkId = nrand()
+	ck.opSeq = 0
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
-	// Your code here.
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 	args.Num = num
 	for {
 		// try each known server.
@@ -50,9 +58,9 @@ func (ck *Clerk) Query(num int) Config {
 
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
-	// Your code here.
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 	args.Servers = servers
-
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -68,7 +76,8 @@ func (ck *Clerk) Join(servers map[int][]string) {
 
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
-	// Your code here.
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 	args.GIDs = gids
 
 	for {
@@ -86,7 +95,8 @@ func (ck *Clerk) Leave(gids []int) {
 
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
-	// Your code here.
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 	args.Shard = shard
 	args.GID = gid
 
