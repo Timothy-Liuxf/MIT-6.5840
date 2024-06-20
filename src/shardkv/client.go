@@ -11,6 +11,7 @@ package shardkv
 import (
 	"crypto/rand"
 	"math/big"
+	"sync/atomic"
 	"time"
 
 	"6.5840/labrpc"
@@ -36,11 +37,16 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) allocNewOpSeq() int64 {
+	return atomic.AddInt64(&ck.opSeq, 1)
+}
+
 type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+	clerkId  int64
+	opSeq    int64
 }
 
 // the tester calls MakeClerk.
@@ -54,7 +60,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	ck.clerkId = nrand()
+	ck.opSeq = 0
 	return ck
 }
 
@@ -65,6 +72,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 
 	for {
 		shard := key2shard(key)
@@ -88,8 +97,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 // shared by Put and Append.
@@ -99,6 +106,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
+	args.ClerkId = ck.clerkId
+	args.OpSeq = ck.allocNewOpSeq()
 
 	for {
 		shard := key2shard(key)
