@@ -19,6 +19,10 @@ func DPrintln(a ...interface{}) {
 	// log.Println(a...)
 }
 
+func debugPrint4B(a ...interface{}) {
+	// fmt.Println(a...)
+}
+
 func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
@@ -335,6 +339,7 @@ func (sc *ShardCtrler) receiveRaftApply() {
 								}
 								reBalance(&newConfig)
 								sc.configs = append(sc.configs, newConfig)
+								debugPrint4B("JoinOp", op.Servers, "new config:", newConfig)
 							case LeaveOp:
 								newConfig := sc.allocNextConfigWithoutLock()
 								for _, gid := range op.GIDs {
@@ -342,6 +347,7 @@ func (sc *ShardCtrler) receiveRaftApply() {
 								}
 								reBalance(&newConfig)
 								sc.configs = append(sc.configs, newConfig)
+								debugPrint4B("LeaveOp", op.GIDs, "new config:", newConfig)
 							case MoveOp:
 								if op.Shard >= 0 && op.Shard < NShards {
 									newConfig := sc.allocNextConfigWithoutLock()
@@ -353,6 +359,7 @@ func (sc *ShardCtrler) receiveRaftApply() {
 									}
 									sc.configs = append(sc.configs, newConfig)
 								}
+								debugPrint4B("MoveOp", op.Shard, op.GID)
 							}
 							sc.maxAppliedSeqs[clerkId] = op.OpSeq
 						}

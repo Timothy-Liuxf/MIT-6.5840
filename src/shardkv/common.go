@@ -15,17 +15,19 @@ const (
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
+	ErrUnreliable  = "ErrUnreliable"
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key     string
-	Value   string
-	Op      string // "Put" or "Append"
-	ClerkId int64
-	OpSeq   int64
+	Key       string
+	Value     string
+	Op        string // "Put" or "Append"
+	ClerkId   int64
+	OpSeq     int64
+	PrevOpSeq int64
 }
 
 type PutAppendReply struct {
@@ -33,9 +35,10 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key     string
-	ClerkId int64
-	OpSeq   int64
+	Key       string
+	ClerkId   int64
+	OpSeq     int64
+	PrevOpSeq int64
 }
 
 type GetReply struct {

@@ -90,6 +90,11 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
+				if ok && (reply.Err == ErrUnreliable) {
+					args.PrevOpSeq = args.OpSeq
+					args.OpSeq = ck.allocNewOpSeq()
+					break
+				}
 				// ... not ok, or ErrWrongLeader
 			}
 		}
