@@ -624,86 +624,104 @@ func (kv *ShardKV) dataTransfer() {
 				return
 			}
 
-			// TODO: Test what if the data transfer is only done by the leader
+			// QUESTION: Test what if the data transfer is done by all servers
+			//   instead of only the leader sends the data to the other groups
+			//   so that the leader may get response more fast
+			//   but there will be too many send shard data requests
 
-			noDataTransfer := true
-			args := make(map[int]*SendShardDataArgs, 0)
-			maxAppliedSeqs := make(map[int64]int64)
-			for k, v := range kv.maxAppliedSeqs {
-				maxAppliedSeqs[k] = v
-			}
-			for i := 0; i < NShards; i++ {
-				if kv.shardState[i] == Sending {
-					noDataTransfer = false
-					gid := kv.currentConfig.Shards[i]
-					newArgs, ok := args[gid]
-					if !ok {
-						newArgs = &SendShardDataArgs{}
-						newArgs.ReconfigToNum = kv.reconfigToNum
-						newArgs.Gid = kv.gid
-						newArgs.KVStore = [NShards]map[string]string{} // Here I didn't make each maps, so nil visit will occur when the receiver visit the map by mistake
-						newArgs.MaxAppliedSeqs = maxAppliedSeqs
-						newArgs.UnreliableFailes = make(map[int64]map[int64]int)
-					}
-					newArgs.KVStore[i] = make(map[string]string)
-					for k, v := range kv.kvStore[i] {
-						newArgs.KVStore[i][k] = v
-					}
-					for clerkId, opSeqToShards := range kv.unreliableFailes {
-						for opSeq, shard := range opSeqToShards {
-							if shard == i {
-								_, ok := newArgs.UnreliableFailes[clerkId]
-								if !ok {
-									newArgs.UnreliableFailes[clerkId] = make(map[int64]int)
+			_, isLeader := kv.rf.GetState()
+			if isLeader {
+				noDataTransfer := true
+				args := make(map[int]*SendShardDataArgs, 0)
+				maxAppliedSeqs := make(map[int64]int64)
+				for k, v := range kv.maxAppliedSeqs {
+					maxAppliedSeqs[k] = v
+				}
+				for i := 0; i < NShards; i++ {
+					if kv.shardState[i] == Sending {
+						noDataTransfer = false
+						gid := kv.currentConfig.Shards[i]
+						newArgs, ok := args[gid]
+						if !ok {
+							newArgs = &SendShardDataArgs{}
+							newArgs.ReconfigToNum = kv.reconfigToNum
+							newArgs.Gid = kv.gid
+							newArgs.KVStore = [NShards]map[string]string{} // Here I didn't make each maps, so nil visit will occur when the receiver visit the map by mistake
+							newArgs.MaxAppliedSeqs = maxAppliedSeqs
+							newArgs.UnreliableFailes = make(map[int64]map[int64]int)
+						}
+						newArgs.KVStore[i] = make(map[string]string)
+						for k, v := range kv.kvStore[i] {
+							newArgs.KVStore[i][k] = v
+						}
+						for clerkId, opSeqToShards := range kv.unreliableFailes {
+							for opSeq, shard := range opSeqToShards {
+								if shard == i {
+									_, ok := newArgs.UnreliableFailes[clerkId]
+									if !ok {
+										newArgs.UnreliableFailes[clerkId] = make(map[int64]int)
+									}
+									newArgs.UnreliableFailes[clerkId][opSeq] = shard
 								}
-								newArgs.UnreliableFailes[clerkId][opSeq] = shard
+							}
+						}
+						args[gid] = newArgs
+					} else if kv.shardState[i] == Receiving {
+						noDataTransfer = false
+					}
+				}
+
+				go func() {
+					for gid, thisArgs := range args {
+						for _, server := range kv.currentConfig.Groups[gid] {
+							reply := SendShardDataReply{}
+							ok := kv.sendSendShardData(server, thisArgs, &reply)
+							if ok && reply.Success {
+								func() {
+									kv.mu.Lock()
+									defer kv.mu.Unlock()
+
+									_, isLeader := kv.rf.GetState()
+									if !isLeader {
+										return
+									}
+
+									if kv.reconfigToNum == thisArgs.ReconfigToNum {
+										shards := make([]int, 0)
+										for i := 0; i < NShards; i++ {
+											if kv.currentConfig.Shards[i] == gid && kv.shardState[i] == Sending {
+												shards = append(shards, i)
+											}
+										}
+										kv.rf.Start(Op{
+											Op:         HasSentOp,
+											Shards:     shards,
+											ReconfigTo: thisArgs.ReconfigToNum,
+										})
+									}
+								}()
+								break
 							}
 						}
 					}
-					args[gid] = newArgs
-				} else if kv.shardState[i] == Receiving {
-					noDataTransfer = false
+				}()
+
+				if noDataTransfer {
+					kv.reconfigToNum = -1
 				}
-			}
-
-			go func() {
-				for gid, thisArgs := range args {
-					for _, server := range kv.currentConfig.Groups[gid] {
-						reply := SendShardDataReply{}
-						ok := kv.sendSendShardData(server, thisArgs, &reply)
-						if ok && reply.Success {
-							func() {
-								kv.mu.Lock()
-								defer kv.mu.Unlock()
-
-								_, isLeader := kv.rf.GetState()
-								if !isLeader {
-									return
-								}
-
-								if kv.reconfigToNum == thisArgs.ReconfigToNum {
-									shards := make([]int, 0)
-									for i := 0; i < NShards; i++ {
-										if kv.currentConfig.Shards[i] == gid && kv.shardState[i] == Sending {
-											shards = append(shards, i)
-										}
-									}
-									kv.rf.Start(Op{
-										Op:         HasSentOp,
-										Shards:     shards,
-										ReconfigTo: thisArgs.ReconfigToNum,
-									})
-								}
-							}()
-							break
-						}
+			} else {
+				noDataTransfer := true
+				for i := 0; i < NShards; i++ {
+					if kv.shardState[i] == Sending || kv.shardState[i] == Receiving {
+						noDataTransfer = false
 					}
 				}
-			}()
 
-			if noDataTransfer {
-				kv.reconfigToNum = -1
+				if noDataTransfer {
+					kv.reconfigToNum = -1
+				}
 			}
+
 		}()
 		time.Sleep(time.Millisecond * CHECK_DATA_TRANSFER_INTERVAL)
 		// TODO: can I use select <- has new config channel and time.After channel to optimize?
