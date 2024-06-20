@@ -66,7 +66,7 @@ type Op struct {
 	Op      string
 }
 
-func (sc *ShardCtrler) NewClerkWithoutLock(ClerkId int64) {
+func (sc *ShardCtrler) newClerkWithoutLock(ClerkId int64) {
 	_, ok := sc.maxAppliedSeqs[ClerkId]
 	if !ok {
 		sc.maxAppliedSeqs[ClerkId] = 0
@@ -83,8 +83,8 @@ func (sc *ShardCtrler) NewClerkWithoutLock(ClerkId int64) {
 	}
 }
 
-func (sc *ShardCtrler) ExecuteOpWithoutLock(op Op) (bool, Err) {
-	sc.NewClerkWithoutLock(op.ClerkId)
+func (sc *ShardCtrler) executeOpWithoutLock(op Op) (bool, Err) {
+	sc.newClerkWithoutLock(op.ClerkId)
 	if op.OpSeq > sc.maxAppliedSeqs[op.ClerkId] {
 		_, isLeader := sc.rf.GetState()
 		if !isLeader {
@@ -121,7 +121,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	wrongLeader, err := sc.ExecuteOpWithoutLock(Op{
+	wrongLeader, err := sc.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		Servers: args.Servers,
@@ -135,7 +135,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	wrongLeader, err := sc.ExecuteOpWithoutLock(Op{
+	wrongLeader, err := sc.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		GIDs:    args.GIDs,
@@ -149,7 +149,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	wrongLeader, err := sc.ExecuteOpWithoutLock(Op{
+	wrongLeader, err := sc.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		Shard:   args.Shard,
@@ -164,7 +164,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	wrongLeader, err := sc.ExecuteOpWithoutLock(Op{
+	wrongLeader, err := sc.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		Num:     args.Num,
@@ -307,7 +307,7 @@ func reBalance(config *Config) {
 	}
 }
 
-func (sc *ShardCtrler) ReceiveRaftApply() {
+func (sc *ShardCtrler) receiveRaftApply() {
 	for {
 		select {
 		case <-sc.killCh:
@@ -322,7 +322,7 @@ func (sc *ShardCtrler) ReceiveRaftApply() {
 						defer sc.mu.Unlock()
 
 						clerkId := op.ClerkId
-						sc.NewClerkWithoutLock(clerkId)
+						sc.newClerkWithoutLock(clerkId)
 						if op.OpSeq > sc.maxAppliedSeqs[clerkId] {
 							switch op.Op {
 							case JoinOp:
@@ -364,6 +364,16 @@ func (sc *ShardCtrler) ReceiveRaftApply() {
 	}
 }
 
+func DefaultConfig() Config {
+	config := Config{}
+	config.Num = 0
+	for i := 0; i < NShards; i++ {
+		config.Shards[i] = INVALID_GID
+	}
+	config.Groups = map[int][]string{}
+	return config
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant shardctrler service.
@@ -374,11 +384,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.me = me
 
 	sc.configs = make([]Config, 1)
-	sc.configs[0].Num = 0
-	for i := 0; i < NShards; i++ {
-		sc.configs[0].Shards[i] = INVALID_GID
-	}
-	sc.configs[0].Groups = map[int][]string{}
+	sc.configs[0] = DefaultConfig()
 
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
@@ -390,7 +396,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.waitCond = make(map[int64]*sync.Cond)
 	sc.killCh = make(chan int, 1)
 
-	go sc.ReceiveRaftApply()
+	go sc.receiveRaftApply()
 
 	return sc
 }

@@ -69,7 +69,7 @@ func minInt64(a, b int64) int64 {
 	return b
 }
 
-func (kv *KVServer) NewClerkWithoutLock(ClerkId int64) {
+func (kv *KVServer) newClerkWithoutLock(ClerkId int64) {
 	_, ok := kv.maxAppliedSeqs[ClerkId]
 	if !ok {
 		kv.maxAppliedSeqs[ClerkId] = 0
@@ -86,8 +86,8 @@ func (kv *KVServer) NewClerkWithoutLock(ClerkId int64) {
 	}
 }
 
-func (kv *KVServer) ExecuteOpWithoutLock(op Op) Err {
-	kv.NewClerkWithoutLock(op.ClerkId)
+func (kv *KVServer) executeOpWithoutLock(op Op) Err {
+	kv.newClerkWithoutLock(op.ClerkId)
 	if op.OpSeq > kv.maxAppliedSeqs[op.ClerkId] {
 		_, isLeader := kv.rf.GetState()
 		if !isLeader {
@@ -124,7 +124,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	err := kv.ExecuteOpWithoutLock(Op{
+	err := kv.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		Key:     args.Key,
@@ -150,7 +150,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	err := kv.ExecuteOpWithoutLock(Op{
+	err := kv.executeOpWithoutLock(Op{
 		ClerkId: args.ClerkId,
 		OpSeq:   args.OpSeq,
 		Key:     args.Key,
@@ -183,7 +183,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-func (kv *KVServer) ReceiveRaftApply() {
+func (kv *KVServer) receiveRaftApply() {
 	for {
 		select {
 		case <-kv.killCh:
@@ -193,7 +193,7 @@ func (kv *KVServer) ReceiveRaftApply() {
 				func() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
-					kv.ReadSnapshotWithoutLock(msg.Snapshot)
+					kv.readSnapshotWithoutLock(msg.Snapshot)
 					for _, cond := range kv.waitCond {
 						cond.Broadcast()
 					}
@@ -209,7 +209,7 @@ func (kv *KVServer) ReceiveRaftApply() {
 
 						DPrintln(kv.me, "Apply", op.ClerkId, op.OpSeq, op)
 						clerkId := op.ClerkId
-						kv.NewClerkWithoutLock(clerkId)
+						kv.newClerkWithoutLock(clerkId)
 						if op.OpSeq > kv.maxAppliedSeqs[clerkId] {
 							if op.Op == "Put" || op.Op == "Append" {
 								value, ok := kv.kvStore[op.Key]
@@ -227,7 +227,7 @@ func (kv *KVServer) ReceiveRaftApply() {
 						kv.waitCond[clerkId].Broadcast() // QUESTION: this broadcast might be moved into the if block
 
 						if kv.maxraftstate != -1 && float64(kv.persister.RaftStateSize()) >= 0.8*float64(kv.maxraftstate) {
-							kv.SaveToSnapshotWithoutLock(msg.CommandIndex)
+							kv.saveToSnapshotWithoutLock(msg.CommandIndex)
 						}
 					}()
 				}
@@ -236,7 +236,7 @@ func (kv *KVServer) ReceiveRaftApply() {
 	}
 }
 
-func (kv *KVServer) SaveToSnapshotWithoutLock(index int) {
+func (kv *KVServer) saveToSnapshotWithoutLock(index int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
@@ -250,7 +250,7 @@ func (kv *KVServer) SaveToSnapshotWithoutLock(index int) {
 	kv.rf.Snapshot(index, w.Bytes())
 }
 
-func (kv *KVServer) ReadSnapshotWithoutLock(snapshot []byte) {
+func (kv *KVServer) readSnapshotWithoutLock(snapshot []byte) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 
@@ -300,10 +300,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 
 	if maxraftstate != -1 && persister.SnapshotSize() > 0 {
-		kv.ReadSnapshotWithoutLock(persister.ReadSnapshot())
+		kv.readSnapshotWithoutLock(persister.ReadSnapshot())
 	}
 
-	go kv.ReceiveRaftApply()
+	go kv.receiveRaftApply()
 
 	return kv
 }
