@@ -129,8 +129,8 @@ func (kv *ShardKV) newClerkWithoutLock(ClerkId int64) {
 
 func (kv *ShardKV) executeOpWithoutLock(op Op) Err {
 	kv.newClerkWithoutLock(op.ClerkId)
+	shard := key2shard(op.Key)
 	if op.OpSeq > kv.maxAppliedSeqs[op.ClerkId] {
-		shard := key2shard(op.Key)
 		if kv.shardState[shard] != Active {
 			return ErrWrongGroup
 		}
@@ -146,6 +146,7 @@ func (kv *ShardKV) executeOpWithoutLock(op Op) Err {
 		if !success {
 			return ErrWrongLeader
 		}
+		DPrintln("Server", kv.gid, kv.me, "start to execute", op.Value, op.OpSeq, op.PrevOpSeq)
 
 		go func() {
 			<-time.After(time.Millisecond * TIMEOUT)
@@ -163,11 +164,16 @@ func (kv *ShardKV) executeOpWithoutLock(op Op) Err {
 			return ErrTimeout
 		}
 	}
+
 	if _, ok := kv.unreliableFailes[op.ClerkId]; ok {
 		if _, ok := kv.unreliableFailes[op.ClerkId][op.OpSeq]; ok {
 			return ErrUnreliable
 		}
 	}
+	if kv.shardState[shard] != Active {
+		return ErrWrongGroup
+	}
+
 	return OK
 }
 
@@ -275,22 +281,23 @@ func (kv *ShardKV) receiveRaftApply() {
 									// And the user request and the reconfig request are linearized
 									// But in unreliable network, the leader might accept the request
 									// WPrintln("Warning: The shard is not active when applying, which is impossible.")
+									if _, ok := kv.unreliableFailes[clerkId]; !ok {
+										kv.unreliableFailes[clerkId] = make(map[int64]int)
+									}
 									kv.unreliableFailes[clerkId][op.OpSeq] = shard
-								}
-
-								if op.Op == "Put" {
-									kv.kvStore[shard][op.Key] = op.Value
-									DPrintln("Server", kv.gid, kv.me, "apply Put", op.Key, op.Value)
-								} else if op.Op == "Append" {
-									value, ok := kv.kvStore[shard][op.Key]
-									if !ok {
-										value = ""
+									DPrintln("Server", kv.gid, kv.me, "apply", op, "but the shard is not active")
+								} else {
+									if op.Op == "Put" {
+										kv.kvStore[shard][op.Key] = op.Value
+										DPrintln("Server", kv.gid, kv.me, "apply Put", op.Key, op.Value)
+									} else if op.Op == "Append" {
+										value, ok := kv.kvStore[shard][op.Key]
+										if !ok {
+											value = ""
+										}
+										kv.kvStore[shard][op.Key] = value + op.Value
+										DPrintln("Server", kv.gid, kv.me, "apply Append", op.Key, op.Value, "result:", value+op.Value, "OpSeq:", op.OpSeq, op.PrevOpSeq)
 									}
-									kv.kvStore[shard][op.Key] = value + op.Value
-									if kv.shardState[shard] != Active {
-										DPrintln("Server", kv.gid, kv.me, "apply Append", op.Key, op.Value, "but the shard is not active", "result:", value+op.Value)
-									}
-									DPrintln("Server", kv.gid, kv.me, "apply Append", op.Key, op.Value, "result:", value+op.Value)
 								}
 								kv.maxAppliedSeqs[clerkId] = op.OpSeq
 							}
@@ -351,7 +358,7 @@ func (kv *ShardKV) receiveRaftApply() {
 									}
 								}
 							case ReceivedShardOp:
-								DPrintln("Server", kv.gid, kv.me, "received shard data", op.Gid, op.KVStore, op.MaxAppliedSeqs)
+								DPrintln("Server", kv.gid, kv.me, "received shard data", op.Gid, op.KVStore, op.MaxAppliedSeqs, op.UnreliableFailes)
 								if kv.reconfigToNum == op.ReconfigTo && kv.reconfigToNum == kv.currentConfig.Num {
 									transferedShardData = true
 									gid := op.Gid
@@ -367,7 +374,7 @@ func (kv *ShardKV) receiveRaftApply() {
 									for k, v := range op.MaxAppliedSeqs {
 										kv.maxAppliedSeqs[k] = maxInt64(kv.maxAppliedSeqs[k], v)
 									}
-									for clerkId, opSeqToShards := range kv.unreliableFailes {
+									for clerkId, opSeqToShards := range op.UnreliableFailes {
 										if _, ok := kv.unreliableFailes[clerkId]; !ok {
 											kv.unreliableFailes[clerkId] = make(map[int64]int)
 										}
@@ -375,11 +382,14 @@ func (kv *ShardKV) receiveRaftApply() {
 											if kv.shardState[shard] == Active {
 												kv.unreliableFailes[clerkId][opSeq] = shard
 											}
+											DPrintln("Server", kv.gid, kv.me, "received shard data unreliable:", kv.shardState[shard] == Active, "param:", clerkId, opSeq, shard,
+												"config:", kv.currentConfig)
 										}
 										if len(kv.unreliableFailes[clerkId]) == 0 {
 											delete(kv.unreliableFailes, clerkId)
 										}
 									}
+									DPrintln("Server", kv.gid, kv.me, "successflly received shard data, current unreliables:", kv.unreliableFailes)
 								}
 								cond, ok := kv.gidWaitCond[op.Gid]
 								if ok {
@@ -505,8 +515,6 @@ func (kv *ShardKV) checkNewConfig() {
 				DPrintln("Server", kv.gid, kv.me, "config:", kv.currentConfig, "shard state:", kv.shardState, "new config:", newConfig)
 			}()
 		}
-		DPrintln("Server", kv.gid, kv.me, "config:", kv.currentConfig, "shard state:", kv.shardState)
-		time.Sleep(time.Millisecond * CHECK_NEW_CONFIG_INTERVAL)
 	}
 }
 
@@ -654,6 +662,7 @@ func (kv *ShardKV) dataTransfer() {
 						for k, v := range kv.kvStore[i] {
 							newArgs.KVStore[i][k] = v
 						}
+						DPrintln("Server", kv.gid, kv.me, "send shard data", newArgs.KVStore)
 						for clerkId, opSeqToShards := range kv.unreliableFailes {
 							for opSeq, shard := range opSeqToShards {
 								if shard == i {
@@ -662,6 +671,7 @@ func (kv *ShardKV) dataTransfer() {
 										newArgs.UnreliableFailes[clerkId] = make(map[int64]int)
 									}
 									newArgs.UnreliableFailes[clerkId][opSeq] = shard
+									DPrintln("Server", kv.gid, kv.me, "send shard data unreliable", clerkId, opSeq, shard)
 								}
 							}
 						}
@@ -670,10 +680,12 @@ func (kv *ShardKV) dataTransfer() {
 						noDataTransfer = false
 					}
 				}
+				DPrintln("Server", kv.gid, kv.me, "send shard data")
 
+				currentConfig := kv.currentConfig
 				go func() {
 					for gid, thisArgs := range args {
-						for _, server := range kv.currentConfig.Groups[gid] {
+						for _, server := range currentConfig.Groups[gid] {
 							reply := SendShardDataReply{}
 							ok := kv.sendSendShardData(server, thisArgs, &reply)
 							if ok && reply.Success {

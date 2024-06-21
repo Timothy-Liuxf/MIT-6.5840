@@ -122,10 +122,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				DPrintln(ck.clerkId, "PutAppend", args.Key, args.Value, args.Op, "to", servers[si], "ok", ok, "reply", reply.Err, "OpSeq:", args.OpSeq, "PrevOpSeq:", args.PrevOpSeq)
 				if ok && reply.Err == OK {
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
+					break
+				}
+				if ok && reply.Err == ErrUnreliable {
+					args.PrevOpSeq = args.OpSeq
+					args.OpSeq = ck.allocNewOpSeq()
 					break
 				}
 				// ... not ok, or ErrWrongLeader
