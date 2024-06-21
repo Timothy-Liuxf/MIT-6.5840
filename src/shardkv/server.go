@@ -724,7 +724,8 @@ func (kv *ShardKV) dataTransfer() {
 
 		}()
 		time.Sleep(time.Millisecond * CHECK_DATA_TRANSFER_INTERVAL)
-		// TODO: can I use select <- has new config channel and time.After channel to optimize?
+		// QUESTION: can I use select <- has new config channel and time.After channel
+		// or condition variables to optimize?
 		// Enlarge the time interval is not OK? Timeout is essential if all failed
 		// But the current implementation has too much send shard data requests
 	}
