@@ -1,0 +1,113 @@
+func TestBackup2B(t *testing.T) {
+	number := 100
+	genInt := func() int {
+		number++
+		return number
+	}
+
+	servers := 5
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
+
+	cfg.one(genInt(), servers, true)
+
+	// put leader and one follower in a partition
+	leader1 := cfg.checkOneLeader()
+	cfg.disconnect((leader1 + 2) % servers)
+	cfg.disconnect((leader1 + 3) % servers)
+	cfg.disconnect((leader1 + 4) % servers)
+
+	fmt.Println("**************")
+
+	// submit lots of commands that won't commit
+	for i := 0; i < 50; i++ {
+		cfg.rafts[leader1].Start(genInt())
+	}
+
+	time.Sleep(RaftElectionTimeout / 2)
+
+	cfg.disconnect((leader1 + 0) % servers)
+	cfg.disconnect((leader1 + 1) % servers)
+
+	// allow other partition to recover
+	cfg.connect((leader1 + 2) % servers)
+	cfg.connect((leader1 + 3) % servers)
+	cfg.connect((leader1 + 4) % servers)
+
+	fmt.Println("==============")
+
+	// lots of successful commands to new group.
+	for i := 0; i < 50; i++ {
+		cfg.one(genInt(), 3, true)
+	}
+
+	fmt.Println("--------------")
+
+	// now another partitioned leader and one follower
+	leader2 := cfg.checkOneLeader()
+	other := (leader1 + 2) % servers
+	if leader2 == other {
+		other = (leader2 + 1) % servers
+	}
+	cfg.disconnect(other)
+
+	// lots more commands that won't commit
+	for i := 0; i < 50; i++ {
+		cfg.rafts[leader2].Start(genInt())
+	}
+
+	fmt.Println("||||||||||||||||")
+
+	time.Sleep(RaftElectionTimeout / 2)
+
+	// bring original leader back to life,
+	for i := 0; i < servers; i++ {
+		cfg.disconnect(i)
+	}
+	cfg.connect((leader1 + 0) % servers)
+	cfg.connect((leader1 + 1) % servers)
+	cfg.connect(other)
+
+	// lots of successful commands to new group.
+	for i := 0; i < 50; i++ {
+		cfg.one(genInt(), 3, true)
+	}
+
+	fmt.Println("++++++++++++++")
+
+	// now everyone
+	for i := 0; i < servers; i++ {
+		cfg.connect(i)
+	}
+	cfg.one(genInt(), servers, true)
+
+	cfg.end()
+}
+
+https://www.cnblogs.com/lawliet12/p/16972383.html
+Leader 发送 AppendEntries ，复制成功的时候，nextIndex 和 matchIndex 的维护需要注意使用 args 中的 prevLogIndex + 实际同步的 log 数量，而不能单纯累加。
+还有一种情况如下：
+Test (2C): Figure 8 (unreliable) ...
+2019/05/01 09:49:14 apply error: commit index=235 server=0 7998 != server=2 4299
+exit status 1
+FAIL raft 28.516s
+
+在拿到 reply 后他要用 currentTerm 和 args.Term去做比较。也就是说 2 个 sendRPC 的地方，在拿到 reply 之后，还要做个 CHECK ，如果 currentTerm 和 args.Term 不一致，就要直接 return ，而忽略这个 reply。
+完整代码参考 github ，目前 2C 的 Figure 8 unreliable 还有小概率 Failed，后续继续观察修复 bug。
+
+			if args.Term != rf.currentTerm {
+				return
+			}
+
++ 判断是否是 leader 再发 rpc
+
+https://juejin.cn/post/7330143281525391414 // Figure 8 unrelibale 性能问题？
+
+https://github.com/niebayes/MIT-6.5840
+log 具有相同 term 时不能被截断，因为可能有远古时期发送的 AppendEntries 并且含有当时的 leader 已经 apply 过的 log entry 经很长时间之后才到达，导致 log 丢失，例如：
+1 1 2 2 2 2
+在得到：
+1 1 2 2
+时不能截断，需要保持
